@@ -1,0 +1,13 @@
+# Laravel backend (once composer/artisan are run in backend/)
+backend/vendor/
+backend/node_modules/
+backend/.env
+backend/database/database.sqlite
+backend/storage/*.key
+backend/bootstrap/cache/*.php
+backend/.phpunit.result.cache
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
