@@ -173,3 +173,50 @@ client-side. To connect it to this API:
 
 Happy to do that wiring next if you want the frontend actually talking to
 this instead of running on the hardcoded catalog.
+
+---
+
+## Deploying to Vercel
+
+Vercel doesn't run PHP natively — this uses the community
+[`vercel-php`](https://github.com/vercel-community/php) runtime, which
+runs Laravel as a single serverless function. `api/index.php`,
+`vercel.json`, and `.vercelignore` in this folder are already set up for
+it. Before deploying, understand the tradeoffs:
+
+- **No persistent disk.** SQLite is out — point `DB_CONNECTION` at an
+  external database (PlanetScale/MySQL, Neon/Supabase Postgres, Turso).
+- **No cron or queue workers.** `artisan schedule:run` and queued jobs
+  won't run on Vercel; skip them or run them elsewhere.
+- **Sessions/cache** are forced to `cookie` / `array` in `vercel.json`
+  since there's no shared disk between invocations.
+- **Migrations don't run on deploy.** Run `php artisan migrate --force`
+  against the external DB yourself (locally, or via a GitHub Actions step)
+  before or after each deploy — Vercel's build step only runs
+  `composer install`.
+
+### Steps
+
+1. Provision an external database and note its connection details.
+2. Generate an app key locally: `php artisan key:generate --show`
+3. Install the Vercel CLI and log in:
+   ```bash
+   npm i -g vercel
+   vercel login
+   ```
+4. From this `backend/` folder, run `vercel` and accept the defaults on
+   first deploy (it'll link/create a Vercel project).
+5. In the Vercel dashboard for that project, add environment variables:
+   `APP_KEY`, `APP_URL`, `DB_CONNECTION`, `DB_HOST`, `DB_PORT`,
+   `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` (matching whatever database
+   you provisioned in step 1).
+6. Run migrations against that database from your machine:
+   ```bash
+   php artisan migrate --seed --force
+   ```
+7. Redeploy: `vercel --prod`.
+
+From then on, connecting GitHub in the Vercel dashboard gives you
+automatic deploys on push — just remember migrations still need to be run
+separately whenever the schema changes, since Vercel itself won't do it.
+
