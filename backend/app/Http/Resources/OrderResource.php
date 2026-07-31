@@ -13,6 +13,9 @@ class OrderResource extends JsonResource
             'id' => $this->id,
             'business_type' => $this->business_type,
             'status' => $this->status,
+            'customer_id' => $this->customer_id,
+            'customer_name' => $this->whenLoaded('customer', fn () => $this->customer?->name),
+            'register_session_id' => $this->register_session_id,
             'items' => $this->items->map(fn ($item) => [
                 'id' => $item->id,
                 'product_id' => $item->product_id,
@@ -31,6 +34,8 @@ class OrderResource extends JsonResource
             'tendered' => $this->tendered !== null ? (float) $this->tendered : null,
             'change_due' => $this->change_due !== null ? (float) $this->change_due : null,
             'completed_at' => $this->completed_at?->toIso8601String(),
+            'voided_at' => $this->voided_at?->toIso8601String(),
+            'void_reason' => $this->void_reason,
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HABB POS — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;0,700;1,500&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./shared.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <div>
+        <h1>HABB POS</h1>
+        <span class="tag">back office</span>
+      </div>
+    </div>
+    <div class="top-right">
+      <a class="nav-link" href="./index.html">🖥 Terminal</a>
+      <div class="held-pill" id="whoBadge">👤 …</div>
+    </div>
+  </header>
+
+  <div class="admin-shell">
+    <div class="mode-orbit" id="modeOrbit" style="align-self:flex-start;"></div>
+    <div class="admin-tabs" id="adminTabs"></div>
+    <div class="admin-panel" id="panelDashboard"></div>
+    <div class="admin-panel" id="panelInventory" style="display:none;"></div>
+    <div class="admin-panel" id="panelPurchases" style="display:none;"></div>
+    <div class="admin-panel" id="panelCustomers" style="display:none;"></div>
+    <div class="admin-panel" id="panelExpenses" style="display:none;"></div>
+  </div>
+</div>
+
+<div class="login-screen" id="loginScreen">
+  <div class="login-card">
+    <h2>HABB POS</h2>
+    <p>Admin sign-in required</p>
+    <input id="loginEmail" type="email" placeholder="Email" value="admin@habb.lk">
+    <input id="loginPassword" type="password" placeholder="Password" value="password">
+    <button class="btn charge" style="width:100%" onclick="login()">Sign in</button>
+    <div class="login-error" id="loginError"></div>
+    <div class="login-hint">Only <b>admin</b>-role accounts can see the back office.</div>
+  </div>
+</div>
+
+<script>
+const API_BASE = (window.HABB_CONFIG && window.HABB_CONFIG.API_BASE_URL) || 'http://localhost:8000/api/v1';
+
+function getToken(){ return localStorage.getItem('habb_pos_token'); }
+function getUser(){ try{ return JSON.parse(localStorage.getItem('habb_pos_user') || 'null'); }catch(e){ return null; } }
+function clearSession(){ localStorage.removeItem('habb_pos_token'); localStorage.removeItem('habb_pos_user'); }
+
+async function api(path, options = {}) {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: {
+      'Content-Type': 'application/json', 'Accept': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    },
+    ...options,
+  });
+  if (res.status === 401) { clearSession(); location.href = './index.html'; throw new Error('Session expired.'); }
+  if (res.status === 403) { throw new Error('Admin access required for this action.'); }
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.message || (body?.errors ? JSON.stringify(body.errors) : `Request failed (${res.status})`));
+  return body;
+}
+
+async function login(){
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = '';
+  try{
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const body = await res.json();
+    if(!res.ok) throw new Error(body?.message || 'Login failed.');
+    if(body.user.role !== 'admin'){ throw new Error('This account isn\'t an admin — use the terminal instead.'); }
+    localStorage.setItem('habb_pos_token', body.token);
+    localStorage.setItem('habb_pos_user', JSON.stringify(body.user));
+    document.getElementById('loginScreen').style.display = 'none';
+    boot();
+  }catch(err){ errEl.textContent = err.message; }
+}
+
+const BUSINESS_TYPES = [
+  { key: 'retail', label: 'Retail', icon: '🛍️' },
+  { key: 'cafe', label: 'Café', icon: '☕' },
+  { key: 'service', label: 'Service', icon: '🛠️' },
+];
+const money = n => '$' + Number(n || 0).toFixed(2);
+const todayStr = () => new Date().toISOString().slice(0,10);
+const monthStartStr = () => { const d = new Date(); d.setDate(1); return d.toISOString().slice(0,10); };
+
+let state = { mode: 'retail', tab: 'dashboard', suppliers: [], products: [] };
+
+function showErr(err){ console.error(err); alert(err.message || 'Something went wrong.'); }
+
+/* ---------------- Boot / nav ---------------- */
+function renderModeOrbit(){
+  document.getElementById('modeOrbit').innerHTML = BUSINESS_TYPES.map(c => `
+    <button class="${state.mode===c.key?'active':''}" onclick="switchMode('${c.key}')" style="border:none; cursor:pointer; padding:9px 16px; border-radius:999px; font-weight:700; font-size:13px; background:${state.mode===c.key?'var(--orange)':'rgba(255,255,255,0.1)'}; color:${state.mode===c.key?'#1a0f08':'rgba(255,255,255,0.75)'};">
+      ${c.icon} ${c.label}
+    </button>
+  `).join('');
+}
+function switchMode(mode){ state.mode = mode; renderModeOrbit(); renderTab(); }
+
+const TABS = [
+  { key: 'dashboard', label: '📊 Dashboard' },
+  { key: 'inventory', label: '📦 Inventory' },
+  { key: 'purchases', label: '🚚 Purchases' },
+  { key: 'customers', label: '🧑\u200d🤝\u200d🧑 Customers' },
+  { key: 'expenses', label: '💸 Expenses' },
+];
+function renderTabs(){
+  document.getElementById('adminTabs').innerHTML = TABS.map(t => `
+    <button class="${state.tab===t.key?'active':''}" onclick="setTab('${t.key}')">${t.label}</button>
+  `).join('');
+}
+function setTab(tab){
+  state.tab = tab;
+  renderTabs();
+  ['Dashboard','Inventory','Purchases','Customers','Expenses'].forEach(p => {
+    document.getElementById('panel'+p).style.display = (p.toLowerCase() === tab) ? 'block' : 'none';
+  });
+  renderTab();
+}
+function renderTab(){
+  if(state.tab === 'dashboard') renderDashboard();
+  if(state.tab === 'inventory') renderInventory();
+  if(state.tab === 'purchases') renderPurchases();
+  if(state.tab === 'customers') renderCustomers();
+  if(state.tab === 'expenses') renderExpenses();
+}
+
+/* ================= DASHBOARD ================= */
+async function renderDashboard(){
+  const el = document.getElementById('panelDashboard');
+  el.innerHTML = `<h3>Today at a glance</h3><p>Loading…</p>`;
+  try{
+    const [summary, topProducts, lowStock] = await Promise.all([
+      api(`/reports/summary?business_type=${state.mode}&date_from=${todayStr()}&date_to=${todayStr()}`),
+      api(`/reports/top-products?business_type=${state.mode}&date_from=${monthStartStr()}&date_to=${todayStr()}`),
+      api(`/reports/low-stock?business_type=${state.mode}`),
+    ]);
+    const s = summary.data;
+    el.innerHTML = `
+      <h3>Today — ${BUSINESS_TYPES.find(b=>b.key===state.mode).label}</h3>
+      <div class="stat-grid">
+        <div class="stat-card"><div class="lbl">Revenue</div><div class="num">${money(s.revenue)}</div></div>
+        <div class="stat-card"><div class="lbl">Orders</div><div class="num">${s.order_count}</div></div>
+        <div class="stat-card"><div class="lbl">Avg ticket</div><div class="num">${money(s.average_ticket)}</div></div>
+        <div class="stat-card"><div class="lbl">Tax collected</div><div class="num">${money(s.tax_collected)}</div></div>
+        <div class="stat-card"><div class="lbl">Expenses</div><div class="num">${money(s.expenses)}</div></div>
+        <div class="stat-card"><div class="lbl">Net</div><div class="num">${money(s.net)}</div></div>
+      </div>
+
+      <h3>Top sellers this month</h3>
+      <table class="data-table">
+        <thead><tr><th>Product</th><th>Qty sold</th><th>Revenue</th></tr></thead>
+        <tbody>
+          ${(topProducts.data||[]).length ? topProducts.data.map(p => `
+            <tr><td>${p.name}</td><td>${p.qty_sold}</td><td>${money(p.revenue)}</td></tr>
+          `).join('') : '<tr><td colspan="3" style="color:var(--ink-soft);">No sales yet this month.</td></tr>'}
+        </tbody>
+      </table>
+
+      <h3 style="margin-top:20px;">Low stock</h3>
+      <table class="data-table">
+        <thead><tr><th>Product</th><th>Stock left</th></tr></thead>
+        <tbody>
+          ${(lowStock.data||[]).length ? lowStock.data.map(p => `
+            <tr><td>${p.emoji||''} ${p.name}</td><td><span class="pill low">${p.stock} left</span></td></tr>
+          `).join('') : '<tr><td colspan="2" style="color:var(--ink-soft);">Nothing running low.</td></tr>'}
+        </tbody>
+      </table>
+    `;
+  }catch(err){ el.innerHTML = `<h3>Dashboard</h3><p style="color:#c0392b;">${err.message}</p>`; }
+}
+
+/* ================= INVENTORY ================= */
+async function loadCategoriesFor(mode){
+  const res = await api(`/categories?business_type=${mode}`);
+  return res.data || [];
+}
+async function renderInventory(){
+  const el = document.getElementById('panelInventory');
+  el.innerHTML = `<h3>Inventory</h3><p>Loading…</p>`;
+  try{
+    const [productsRes, categories] = await Promise.all([
+      api(`/products?business_type=${state.mode}&category=all&search=`),
+      loadCategoriesFor(state.mode),
+    ]);
+    state.products = productsRes.data || [];
+    state.categoriesForMode = categories;
+
+    el.innerHTML = `
+      <h3>Inventory — ${BUSINESS_TYPES.find(b=>b.key===state.mode).label}</h3>
+      <div class="inline-form" id="newProductForm">
+        <div class="field"><label>Name</label><input id="npName" type="text"></div>
+        <div class="field"><label>Category</label>
+          <select id="npCategory">${categories.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>Price</label><input id="npPrice" type="number" step="0.01" style="width:90px;"></div>
+        <div class="field"><label>Stock</label><input id="npStock" type="number" style="width:80px;" value="100"></div>
+        <div class="field"><label>Emoji</label><input id="npEmoji" type="text" style="width:60px;" value="🏷️"></div>
+        <button class="btn charge" style="padding:10px 16px;" onclick="createProduct()">+ Add product</button>
+      </div>
+      <table class="data-table">
+        <thead><tr><th>Product</th><th>Price</th><th>Cost</th><th>Stock</th><th>Adjust</th></tr></thead>
+        <tbody>
+          ${state.products.map(p => `
+            <tr>
+              <td>${p.emoji||''} ${p.name}</td>
+              <td>${money(p.price)}</td>
+              <td>${p.cost_price!=null ? money(p.cost_price) : '—'}</td>
+              <td>${p.unlimited_stock ? '∞' : `<span class="pill ${p.stock<=6?'low':'ok'}">${p.stock}</span>`}</td>
+              <td>
+                ${p.unlimited_stock ? '—' : `
+                <button class="btn ghost" style="padding:4px 10px; font-size:12px;" onclick="adjustStock(${p.id}, 1)">+1</button>
+                <button class="btn ghost" style="padding:4px 10px; font-size:12px;" onclick="adjustStock(${p.id}, -1)">−1</button>
+                `}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }catch(err){ el.innerHTML = `<h3>Inventory</h3><p style="color:#c0392b;">${err.message}</p>`; }
+}
+async function createProduct(){
+  const name = document.getElementById('npName').value.trim();
+  const category_id = parseInt(document.getElementById('npCategory').value);
+  const price = parseFloat(document.getElementById('npPrice').value || '0');
+  const stock = parseInt(document.getElementById('npStock').value || '0');
+  const emoji = document.getElementById('npEmoji').value.trim();
+  if(!name || !price){ alert('Name and price are required.'); return; }
+  try{
+    await api('/products', { method:'POST', body: JSON.stringify({ business_type: state.mode, category_id, name, price, stock, emoji }) });
+    renderInventory();
+  }catch(err){ showErr(err); }
+}
+async function adjustStock(productId, delta){
+  const reason = delta > 0 ? 'Manual restock' : 'Manual correction';
+  try{
+    await api(`/products/${productId}/adjust-stock`, { method:'POST', body: JSON.stringify({ delta, reason }) });
+    renderInventory();
+  }catch(err){ showErr(err); }
+}
+
+/* ================= PURCHASES ================= */
+async function renderPurchases(){
+  const el = document.getElementById('panelPurchases');
+  el.innerHTML = `<h3>Purchases</h3><p>Loading…</p>`;
+  try{
+    const [purchasesRes, suppliersRes, productsRes] = await Promise.all([
+      api(`/purchases?business_type=${state.mode}`),
+      api('/suppliers'),
+      api(`/products?business_type=${state.mode}&category=all&search=`),
+    ]);
+    state.suppliers = suppliersRes.data || [];
+    state.products = productsRes.data || [];
+    const purchases = purchasesRes.data || [];
+
+    el.innerHTML = `
+      <h3>New purchase order</h3>
+      <div class="inline-form">
+        <div class="field"><label>Supplier</label>
+          <select id="poSupplier">${state.suppliers.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select>
+        </div>
+        <button class="btn ghost" style="padding:8px 14px; font-size:12px;" onclick="openNewSupplier()">+ New supplier</button>
+      </div>
+      <div id="poItems"></div>
+      <button class="btn ghost" style="margin-bottom:14px;" onclick="addPoItemRow()">+ Add line item</button>
+      <div><button class="btn charge" onclick="submitPurchase()">Create purchase order</button></div>
+
+      <h3 style="margin-top:24px;">Purchase history</h3>
+      <table class="data-table">
+        <thead><tr><th>#</th><th>Supplier</th><th>Items</th><th>Total cost</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          ${purchases.length ? purchases.map(p => `
+            <tr>
+              <td>${p.id}</td><td>${p.supplier?.name || ''}</td><td>${p.items.length}</td><td>${money(p.total_cost)}</td>
+              <td><span class="pill ${p.status}">${p.status}</span></td>
+              <td>${p.status === 'pending' ? `<button class="btn ghost" style="padding:4px 10px; font-size:12px;" onclick="receivePurchase(${p.id})">Receive</button>` : ''}</td>
+            </tr>
+          `).join('') : '<tr><td colspan="6" style="color:var(--ink-soft);">No purchase orders yet.</td></tr>'}
+        </tbody>
+      </table>
+    `;
+    document.getElementById('poItems').innerHTML = '';
+    addPoItemRow();
+  }catch(err){ el.innerHTML = `<h3>Purchases</h3><p style="color:#c0392b;">${err.message}</p>`; }
+}
+function addPoItemRow(){
+  const wrap = document.getElementById('poItems');
+  const row = document.createElement('div');
+  row.className = 'inline-form po-row';
+  row.innerHTML = `
+    <div class="field"><label>Product</label>
+      <select class="po-product">${state.products.map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label>Qty</label><input class="po-qty" type="number" value="1" style="width:70px;"></div>
+    <div class="field"><label>Unit cost</label><input class="po-cost" type="number" step="0.01" value="0" style="width:90px;"></div>
+    <button class="btn ghost" style="padding:8px 10px; font-size:12px;" onclick="this.parentElement.remove()">✕</button>
+  `;
+  wrap.appendChild(row);
+}
+async function submitPurchase(){
+  const supplier_id = parseInt(document.getElementById('poSupplier').value);
+  const rows = document.querySelectorAll('#poItems .po-row');
+  const items = Array.from(rows).map(r => ({
+    product_id: parseInt(r.querySelector('.po-product').value),
+    qty: parseInt(r.querySelector('.po-qty').value || '0'),
+    unit_cost: parseFloat(r.querySelector('.po-cost').value || '0'),
+  })).filter(i => i.qty > 0);
+  if(!supplier_id || items.length === 0){ alert('Pick a supplier and at least one item.'); return; }
+  try{
+    await api('/purchases', { method:'POST', body: JSON.stringify({ supplier_id, business_type: state.mode, items }) });
+    renderPurchases();
+  }catch(err){ showErr(err); }
+}
+async function receivePurchase(id){
+  if(!confirm('Mark this purchase as received? Stock will be added.')) return;
+  try{ await api(`/purchases/${id}/receive`, { method:'POST' }); renderPurchases(); }
+  catch(err){ showErr(err); }
+}
+async function openNewSupplier(){
+  const name = prompt('Supplier name:');
+  if(!name) return;
+  const phone = prompt('Phone (optional):') || null;
+  try{ await api('/suppliers', { method:'POST', body: JSON.stringify({ name, phone }) }); renderPurchases(); }
+  catch(err){ showErr(err); }
+}
+
+/* ================= CUSTOMERS ================= */
+async function renderCustomers(){
+  const el = document.getElementById('panelCustomers');
+  el.innerHTML = `<h3>Customers</h3><p>Loading…</p>`;
+  try{
+    const res = await api('/customers');
+    const customers = res.data || [];
+    el.innerHTML = `
+      <h3>Customers</h3>
+      <div class="inline-form">
+        <div class="field"><label>Name</label><input id="custName" type="text"></div>
+        <div class="field"><label>Phone</label><input id="custPhone" type="text"></div>
+        <button class="btn charge" style="padding:10px 16px;" onclick="createCustomerAdmin()">+ Add customer</button>
+      </div>
+      <table class="data-table">
+        <thead><tr><th>Name</th><th>Phone</th><th>Loyalty pts</th><th>Credit balance</th></tr></thead>
+        <tbody>
+          ${customers.length ? customers.map(c => `
+            <tr><td>${c.name}</td><td>${c.phone||'—'}</td><td>${c.loyalty_points}</td><td>${money(c.credit_balance)}</td></tr>
+          `).join('') : '<tr><td colspan="4" style="color:var(--ink-soft);">No customers yet.</td></tr>'}
+        </tbody>
+      </table>
+    `;
+  }catch(err){ el.innerHTML = `<h3>Customers</h3><p style="color:#c0392b;">${err.message}</p>`; }
+}
+async function createCustomerAdmin(){
+  const name = document.getElementById('custName').value.trim();
+  const phone = document.getElementById('custPhone').value.trim();
+  if(!name){ alert('Name is required.'); return; }
+  try{ await api('/customers', { method:'POST', body: JSON.stringify({ name, phone }) }); renderCustomers(); }
+  catch(err){ showErr(err); }
+}
+
+/* ================= EXPENSES ================= */
+async function renderExpenses(){
+  const el = document.getElementById('panelExpenses');
+  el.innerHTML = `<h3>Expenses</h3><p>Loading…</p>`;
+  try{
+    const [expensesRes, categoriesRes] = await Promise.all([
+      api(`/expenses?business_type=${state.mode}`),
+      api('/expense-categories'),
+    ]);
+    const expenses = expensesRes.data || [];
+    const categories = categoriesRes.data || [];
+    el.innerHTML = `
+      <h3>Log an expense — ${BUSINESS_TYPES.find(b=>b.key===state.mode).label}</h3>
+      <div class="inline-form">
+        <div class="field"><label>Category</label>
+          <select id="expCategory">${categories.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>Amount</label><input id="expAmount" type="number" step="0.01" style="width:100px;"></div>
+        <div class="field"><label>Date</label><input id="expDate" type="date" value="${todayStr()}"></div>
+        <div class="field"><label>Note</label><input id="expNote" type="text" style="width:180px;"></div>
+        <button class="btn charge" style="padding:10px 16px;" onclick="createExpense()">+ Log expense</button>
+      </div>
+      <table class="data-table">
+        <thead><tr><th>Date</th><th>Category</th><th>Amount</th><th>Note</th></tr></thead>
+        <tbody>
+          ${expenses.length ? expenses.map(e => `
+            <tr><td>${e.spent_on}</td><td>${e.category?.name||'—'}</td><td>${money(e.amount)}</td><td>${e.note||''}</td></tr>
+          `).join('') : '<tr><td colspan="4" style="color:var(--ink-soft);">No expenses logged yet.</td></tr>'}
+        </tbody>
+      </table>
+    `;
+  }catch(err){ el.innerHTML = `<h3>Expenses</h3><p style="color:#c0392b;">${err.message}</p>`; }
+}
+async function createExpense(){
+  const expense_category_id = parseInt(document.getElementById('expCategory').value);
+  const amount = parseFloat(document.getElementById('expAmount').value || '0');
+  const spent_on = document.getElementById('expDate').value;
+  const note = document.getElementById('expNote').value.trim();
+  if(!amount){ alert('Amount is required.'); return; }
+  try{
+    await api('/expenses', { method:'POST', body: JSON.stringify({ business_type: state.mode, expense_category_id, amount, spent_on, note }) });
+    renderExpenses();
+  }catch(err){ showErr(err); }
+}
+
+/* ---------------- Boot ---------------- */
+async function boot(){
+  const user = getUser();
+  if(!user || !getToken()){
+    document.getElementById('loginScreen').style.display = 'flex';
+    return;
+  }
+  if(user.role !== 'admin'){
+    alert('This account isn\'t an admin. Redirecting to the terminal.');
+    location.href = './index.html';
+    return;
+  }
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('whoBadge').textContent = `👤 ${user.name}`;
+  renderModeOrbit();
+  renderTabs();
+  setTab('dashboard');
+}
+boot();
+</script>
+</body>
+</html>

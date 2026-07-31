@@ -7,6 +7,9 @@ backend/storage/*.key
 backend/bootstrap/cache/*.php
 backend/.phpunit.result.cache
 
+# Frontend (Vercel build regenerates config.js from API_BASE_URL env var)
+frontend/node_modules/
+
 # OS/editor
 .DS_Store
 .idea/

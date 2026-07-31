@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Order extends Model
@@ -11,18 +12,30 @@ class Order extends Model
     use HasFactory;
 
     protected $fillable = [
-        'business_type', 'status', 'subtotal', 'discount_percent',
-        'discount_amount', 'tax_rate', 'tax_total', 'total',
-        'payment_method', 'tendered', 'change_due', 'completed_at',
+        'business_type', 'status', 'register_session_id', 'customer_id',
+        'subtotal', 'discount_percent', 'discount_amount', 'tax_rate',
+        'tax_total', 'total', 'payment_method', 'tendered', 'change_due',
+        'completed_at', 'voided_at', 'void_reason',
     ];
 
     protected $casts = [
         'completed_at' => 'datetime',
+        'voided_at' => 'datetime',
     ];
 
     public function items(): HasMany
     {
         return $this->hasMany(OrderItem::class);
+    }
+
+    public function registerSession(): BelongsTo
+    {
+        return $this->belongsTo(RegisterSession::class);
+    }
+
+    public function customer(): BelongsTo
+    {
+        return $this->belongsTo(Customer::class);
     }
 
     /**

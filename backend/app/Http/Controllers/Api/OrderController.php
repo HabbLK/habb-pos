@@ -7,6 +7,7 @@ use App\Http\Resources\OrderResource;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\Product;
+use App\Models\RegisterSession;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -23,6 +24,7 @@ class OrderController extends Controller
             ->with('items')
             ->when($request->filled('status'), fn ($q) => $q->where('status', $request->input('status')))
             ->when($request->filled('business_type'), fn ($q) => $q->where('business_type', $request->input('business_type')))
+            ->when($request->filled('customer_id'), fn ($q) => $q->where('customer_id', $request->input('customer_id')))
             ->orderByDesc('created_at')
             ->limit(100)
             ->get();
@@ -47,10 +49,11 @@ class OrderController extends Controller
             'business_type' => ['required', 'string', 'in:retail,cafe,service'],
             'status' => ['nullable', 'string', 'in:held,completed'],
             'discount_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'customer_id' => ['nullable', 'integer', 'exists:customers,id'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'integer', 'exists:products,id'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
-            'payment_method' => ['nullable', 'string', 'in:Cash,Card,QR'],
+            'payment_method' => ['nullable', 'string', 'in:Cash,Card,QR,Credit'],
             'tendered' => ['nullable', 'numeric', 'min:0'],
         ]);
 
@@ -59,6 +62,7 @@ class OrderController extends Controller
                 'business_type' => $data['business_type'],
                 'status' => 'held', // finalised below if 'completed' was requested
                 'discount_percent' => $data['discount_percent'] ?? 0,
+                'customer_id' => $data['customer_id'] ?? null,
             ]);
 
             $this->syncItems($order, $data['items']);
@@ -69,7 +73,7 @@ class OrderController extends Controller
         });
 
         if (($data['status'] ?? 'held') === 'completed') {
-            $order = $this->finalize($order, $data['payment_method'] ?? null, $data['tendered'] ?? null);
+            $order = $this->finalize($request, $order, $data['payment_method'] ?? null, $data['tendered'] ?? null);
         }
 
         return new OrderResource($order->load('items'));
@@ -89,6 +93,7 @@ class OrderController extends Controller
 
         $data = $request->validate([
             'discount_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'customer_id' => ['nullable', 'integer', 'exists:customers,id'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'integer', 'exists:products,id'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
@@ -98,6 +103,7 @@ class OrderController extends Controller
             $order->items()->delete();
             $this->syncItems($order, $data['items']);
             $order->discount_percent = $data['discount_percent'] ?? $order->discount_percent;
+            $order->customer_id = $data['customer_id'] ?? $order->customer_id;
             $order->recalculateTotals();
             $order->save();
         });
@@ -106,14 +112,14 @@ class OrderController extends Controller
     }
 
     /**
-     * Cancel a held ticket. Completed sales are never deleted — void them
-     * through a future /orders/{order}/void endpoint if you need that.
+     * Cancel a held ticket. Completed sales use /orders/{order}/void instead,
+     * since deleting a paid sale would break sales history and reporting.
      */
     public function destroy(Order $order)
     {
         if ($order->status !== 'held') {
             throw ValidationException::withMessages([
-                'status' => 'Only held tickets can be cancelled.',
+                'status' => 'Only held tickets can be cancelled. Use void for a completed sale.',
             ]);
         }
 
@@ -128,7 +134,7 @@ class OrderController extends Controller
     public function complete(Request $request, Order $order)
     {
         $data = $request->validate([
-            'payment_method' => ['required', 'string', 'in:Cash,Card,QR'],
+            'payment_method' => ['required', 'string', 'in:Cash,Card,QR,Credit'],
             'tendered' => ['nullable', 'numeric', 'min:0'],
         ]);
 
@@ -138,9 +144,50 @@ class OrderController extends Controller
             ]);
         }
 
-        $order = $this->finalize($order, $data['payment_method'], $data['tendered'] ?? null);
+        $order = $this->finalize($request, $order, $data['payment_method'], $data['tendered'] ?? null);
 
         return new OrderResource($order->load('items'));
+    }
+
+    /**
+     * Void a completed sale: restocks every line item and marks the order
+     * voided with a reason. Full-order only for now — partial/line-level
+     * returns are a good next addition once this is in use.
+     */
+    public function void(Request $request, Order $order)
+    {
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'max:255'],
+        ]);
+
+        if ($order->status !== 'completed') {
+            throw ValidationException::withMessages([
+                'status' => 'Only a completed sale can be voided.',
+            ]);
+        }
+
+        DB::transaction(function () use ($order, $data) {
+            foreach ($order->items()->with('product')->get() as $item) {
+                if ($item->product && ! $item->product->isUnlimitedStock()) {
+                    $item->product->increment('stock', $item->qty);
+                }
+            }
+
+            if ($order->customer_id) {
+                $order->customer()->decrement('loyalty_points', (int) floor((float) $order->total));
+                if ($order->payment_method === 'Credit') {
+                    $order->customer()->decrement('credit_balance', (float) $order->total);
+                }
+            }
+
+            $order->update([
+                'status' => 'voided',
+                'voided_at' => now(),
+                'void_reason' => $data['reason'],
+            ]);
+        });
+
+        return new OrderResource($order->fresh()->load('items'));
     }
 
     /**
@@ -178,13 +225,15 @@ class OrderController extends Controller
     }
 
     /**
-     * Mark the ticket paid: validate cash cover, work out change, and
-     * decrement stock for items that track real inventory.
+     * Mark the ticket paid: validate cash cover, work out change, decrement
+     * stock, attach the cashier's open register session (for cash
+     * reconciliation), and award loyalty points / credit balance if a
+     * customer is attached.
      */
-    private function finalize(Order $order, ?string $paymentMethod, ?float $tendered): Order
+    private function finalize(Request $request, Order $order, ?string $paymentMethod, ?float $tendered): Order
     {
-        return DB::transaction(function () use ($order, $paymentMethod, $tendered) {
-            $order->refresh()->load('items.product');
+        return DB::transaction(function () use ($request, $order, $paymentMethod, $tendered) {
+            $order->refresh()->load('items.product', 'customer');
 
             if ($paymentMethod === 'Cash') {
                 if ($tendered === null || $tendered < (float) $order->total) {
@@ -199,16 +248,39 @@ class OrderController extends Controller
                 $order->change_due = 0;
             }
 
+            if ($paymentMethod === 'Credit' && ! $order->customer_id) {
+                throw ValidationException::withMessages([
+                    'customer_id' => 'A customer must be attached to sell on credit.',
+                ]);
+            }
+
             foreach ($order->items as $item) {
                 if ($item->product && ! $item->product->isUnlimitedStock()) {
                     $item->product->decrement('stock', $item->qty);
                 }
             }
 
+            if ($user = $request->user()) {
+                $openSession = RegisterSession::where('user_id', $user->id)
+                    ->where('business_type', $order->business_type)
+                    ->where('status', 'open')
+                    ->latest('opened_at')
+                    ->first();
+                $order->register_session_id = $openSession?->id;
+            }
+
             $order->status = 'completed';
             $order->payment_method = $paymentMethod;
             $order->completed_at = now();
             $order->save();
+
+            if ($order->customer) {
+                // 1 loyalty point per whole currency unit spent.
+                $order->customer->increment('loyalty_points', (int) floor((float) $order->total));
+                if ($paymentMethod === 'Credit') {
+                    $order->customer->increment('credit_balance', (float) $order->total);
+                }
+            }
 
             return $order;
         });
